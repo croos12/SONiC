@@ -1,7 +1,7 @@
 # kdump
 
 ## High Level Design Document
-**Rev 0.4**
+**Rev 0.5**
 
 ## Table of Contents
 
@@ -27,6 +27,7 @@
     - [Design](#design)
     - [Kernel core-dump service](#kernel-core-dump-service)
     - [SONiC Code Changes](#sonic-code-changes)
+    - [Selected-platform installation defaults](#selected-platform-installation-defaults)
     - [Configuration commands:](#configuration-commands)
         - [config kdump <enable|disable>](#config-kdump-enabledisable)
         - [config kdump memory string](#config-kdump-memory-string)
@@ -58,6 +59,7 @@ Rev   |   Date   |  Author   | Change Description
 0.2   | 10/29/19 | O. Singla | Changed the memory allocated for kdump
 0.3   | 11/04/19 | O. Singla | Minor changes
 0.4   | 12/17/19 | O. Singla | Removed the option to force reboot
+0.5   | 10/15/26 | Codex | Selected-platform installation defaults and upgrade acceptance
 
 ## About this Manual
 
@@ -183,8 +185,63 @@ Changes to be done in *sonic-buildimage/build_debian.sh*
    - kdump-tools serive is enabled or disabled depending of administrative state (as stored in ConfigDB)
  - kdump is configured using the SONiC utility *config*.
  - kdump status and configuration can be shown using the SONiC utility *show*.
- - kdump is disabled by default.
- - if kdump is enabled and a new SONiC image is installed using the *sonic-installer* command, kdump will be enabled in the new installed image.
+ - The [shared initial ConfigDB template](https://github.com/sonic-net/sonic-buildimage/blob/6cc9e003a6c6b7eb205b36acc92ea4d7fb6a5fa9/files/build_templates/init_cfg.json.j2#L221-L230) defaults kdump to disabled outside its existing cisco-8000 exception. The selected-platform boot defaults below take precedence through the kernel command line; the shared template is unchanged by this proposal.
+ - if kdump is enabled and a new SONiC image is installed using the *sonic-installer* command, kdump will be enabled in the new installed image. On the selected platforms below, the new image also defaults to enabled when the saved configuration was disabled.
+
+### Selected-platform installation defaults
+
+Fresh ONIE installation and installation of a new image from running SONiC shall provide kdump defaults for exactly these platform variants:
+
+| Platform | Platform identifier under `device/mellanox/` |
+| --- | --- |
+| SN2700 | `x86_64-mlnx_msn2700-r0` |
+| SN2700 A1 | `x86_64-mlnx_msn2700a1-r0` |
+| SN4600 | `x86_64-mlnx_msn4600-r0` |
+| SN4600C | `x86_64-mlnx_msn4600c-r0` |
+| SN4700 | `x86_64-mlnx_msn4700-r0` |
+| SN4280 | `x86_64-nvidia_sn4280-r0` |
+| SN5640 | `x86_64-nvidia_sn5640-r0` |
+| SN6600 LD | `x86_64-nvidia_sn6600_ld-r0` |
+
+These identifiers are defined in the [platform tree](https://github.com/sonic-net/sonic-buildimage/tree/6cc9e003a6c6b7eb205b36acc92ea4d7fb6a5fa9/device/mellanox). SN5600 (`x86_64-nvidia_sn5600-r0`) and all other platforms are outside this change. In particular, other platform identifiers sharing SN2700's base installer configuration retain their existing defaults; the list does not imply coverage of an entire platform family, simulation targets, or Aboot images.
+
+For each selected identifier, add an `installer.conf.override` that appends the following argument to `ONIE_PLATFORM_EXTRA_CMDLINE_LINUX`, preserving the base arguments:
+
+```
+crashkernel=0M-2G:256M,2G-4G:320M,4G-8G:384M,8G-16G:448M,16G-32G:768M,32G-:1G
+```
+
+The [existing image packaging](https://github.com/sonic-net/sonic-buildimage/blob/6cc9e003a6c6b7eb205b36acc92ea4d7fb6a5fa9/build_image.sh#L91-L103) includes this optional override, and the [installer sources it after the base platform file](https://github.com/sonic-net/sonic-buildimage/blob/6cc9e003a6c6b7eb205b36acc92ea4d7fb6a5fa9/installer/install.sh#L95-L110). The [new-image GRUB entry](https://github.com/sonic-net/sonic-buildimage/blob/6cc9e003a6c6b7eb205b36acc92ea4d7fb6a5fa9/installer/default_platform.conf#L718-L724) receives the argument. This requires no new installer API, ConfigDB schema, or daemon behavior.
+
+The selected-platform reservation policy is:
+
+| System RAM interval | Reserved memory |
+| --- | --- |
+| Below 2 GiB | 256 MiB |
+| 2 to below 4 GiB | 320 MiB |
+| 4 to below 8 GiB | 384 MiB |
+| 8 to below 16 GiB | 448 MiB |
+| 16 to below 32 GiB | 768 MiB |
+| 32 GiB and above | 1 GiB |
+
+The kernel selects the interval from its System RAM, rather than the marketed DIMM capacity. Reservation reduces memory available to the normal kernel. A system without a prior reservation loses the full amount above; relative to a 448 MiB reservation, the upper two bands reserve an additional 320 MiB and 576 MiB respectively. The table specifies policy, not measured sufficiency on every hardware variant.
+
+When the new image is activated, kdump shall default to enabled despite a migrated `KDUMP|config` entry with `enabled=false`, including an explicitly saved disable. Existing [hostcfgd command-line reconciliation](https://github.com/sonic-net/sonic-host-services/blob/9f8a0566acb87c271ac1ee85d9a4dcb6f31b1437/scripts/hostcfgd#L1429-L1473) imports the boot argument as `enabled=true` and the memory string above. The administrative CLI remains available after activation; no configuration-provenance field is introduced.
+
+This proposal inherits the existing importer behavior: when enablement or memory differs, hostcfgd writes its complete default dictionary. As a result, the boot policy replaces saved custom memory and can reset `num_dumps`, `remote`, `ssh_string`, and `ssh_path` to daemon defaults. It does not preserve those custom fields during that reconciliation. The same boot-command-line precedence applies when the daemon initializes again; configuration state alone is not proof of a successful reservation or operational readiness.
+
+Installing the image does not reserve memory in the running kernel. A cold boot of the target image is the baseline activation path. No first-transition warmboot or fastboot support is claimed until the target kernel's reservation and capture-kernel loading are validated for the specified source release and hardware.
+
+Acceptance records the source release, public target revision, platform identifier and actual System RAM for each run. The existing daemon [skips its first kdump update after importing the command line](https://github.com/sonic-net/sonic-host-services/blob/9f8a0566acb87c271ac1ee85d9a4dcb6f31b1437/scripts/hostcfgd#L1475-L1495), so reservation and capture-kernel readiness are independent checks.
+
+| Changed behavior | Manual acceptance case |
+| --- | --- |
+| Selected-platform default and reservation | Fresh-install and cold-activate the new image on each selected variant without manually enabling kdump. Verify the boot argument, actual reserved bytes, enabled configuration, Ready status and `/sys/kernel/kexec_crash_loaded=1`; record boot duration. |
+| Default enablement after upgrade | Begin with saved `enabled=false` on an agreed source release, activate the target image through the chosen upgrade path and verify its reservation and Enabled/Ready state. Also record the inherited effect on custom memory and retention/remote-copy fields, and activation duration. |
+| Default crash capture | On an isolated, approved selected target with default readiness established, trigger a controlled kernel panic without a manual enable step; verify a usable local vmcore and kernel log followed by normal recovery. |
+| Declared regression: unselected platform defaults | Verify an available unselected platform, including an SN2700 shared-source alias, retains its existing installer arguments. SN5600 is also outside the selected enablement list. |
+
+Hardware inventory, the source-release matrix and these validation results must be supplied during acceptance; the historical measurements in the Test section do not establish support for the new defaults.
 
 ### Configuration commands:
 
@@ -210,18 +267,21 @@ If the amount of memory is set too low, kdump will not be able to either:
  - store the capture kernel and initramfs image,
  - or store the core dump information.
 
-The default value for the memory allocated for the capture memory is:
+The shared initial ConfigDB template retains this memory value when no boot-command-line policy overrides it:
 *0M-2G:256M,2G-4G:320M,4G-8G:384M,8G-:448M*
 
-Which translates into:
-|RAM size|crashkernel <br>parameter|
-| -----  | ---- |
-| <= 2GB  | 256 MB |
-| <= 4GB  | 320 MB |
-| <= 8GB  | 384 MB |
-| > 8GB | 448 MB |
+The selected platforms use the six-band boot policy in [Selected-platform installation defaults](#selected-platform-installation-defaults), imported by hostcfgd. Its fallback memory policy also uses those six bands; this does not change the shared initial template above.
 
-For instance, if the system has 8GB of RAM, the kernel will allocate 384 MB of memory for the capture kernel.
+The shared initial value translates into these half-open System RAM intervals:
+
+| System RAM interval | Reserved memory |
+| --- | --- |
+| Below 2 GiB | 256 MiB |
+| 2 to below 4 GiB | 320 MiB |
+| 4 to below 8 GiB | 384 MiB |
+| 8 GiB and above | 448 MiB |
+
+For example, exactly 8 GiB of System RAM selects 448 MiB. The kernel's System RAM, rather than marketed DIMM capacity, determines the selected interval.
 
 #### config kdump num_dumps number
 
