@@ -1,7 +1,7 @@
 # kdump
 
 ## High Level Design Document
-**Rev 0.4**
+**Rev 0.5**
 
 ## Table of Contents
 
@@ -27,6 +27,7 @@
     - [Design](#design)
     - [Kernel core-dump service](#kernel-core-dump-service)
     - [SONiC Code Changes](#sonic-code-changes)
+    - [Default enablement on selected platforms](#default-enablement-on-selected-platforms)
     - [Configuration commands:](#configuration-commands)
         - [config kdump <enable|disable>](#config-kdump-enabledisable)
         - [config kdump memory string](#config-kdump-memory-string)
@@ -58,6 +59,7 @@ Rev   |   Date   |  Author   | Change Description
 0.2   | 10/29/19 | O. Singla | Changed the memory allocated for kdump
 0.3   | 11/04/19 | O. Singla | Minor changes
 0.4   | 12/17/19 | O. Singla | Removed the option to force reboot
+0.5   | 10/16/26 | C. Roos   | kdump enabled by default on selected NVIDIA Spectrum platforms
 
 ## About this Manual
 
@@ -98,7 +100,7 @@ Since the kernel core dump files are relatively small (~90 MB), there is no expl
 
 ### Warmboot Requirements
 
-Enabling or Disabling kdump always requires a cold reboot of the switch. Warmboot is not supported while generating a core file in the event of a kernel crash.
+Enabling or Disabling kdump always requires a cold reboot of the switch, except on the platforms listed in [Default enablement on selected platforms](#default-enablement-on-selected-platforms), where kdump is armed at image install with no extra reboot. Warmboot is not supported while generating a core file in the event of a kernel crash.
 
 ### Configuration and Management Requirements
 
@@ -183,8 +185,94 @@ Changes to be done in *sonic-buildimage/build_debian.sh*
    - kdump-tools serive is enabled or disabled depending of administrative state (as stored in ConfigDB)
  - kdump is configured using the SONiC utility *config*.
  - kdump status and configuration can be shown using the SONiC utility *show*.
- - kdump is disabled by default.
- - if kdump is enabled and a new SONiC image is installed using the *sonic-installer* command, kdump will be enabled in the new installed image.
+ - kdump is disabled by default, except on the platforms listed in [Default enablement on selected platforms](#default-enablement-on-selected-platforms).
+ - if kdump is enabled and a new SONiC image is installed using the *sonic-installer* command, kdump will be enabled in the new installed image. On the platforms listed in [Default enablement on selected platforms](#default-enablement-on-selected-platforms), every install arms kdump regardless of the previous state.
+
+### Default enablement on selected platforms
+
+#### Scope
+
+kdump is enabled by default, on fresh install and on upgrade, on:
+
+| Platform | Switch |
+| --- | --- |
+| `x86_64-mlnx_msn2700-r0` | SN2700 |
+| `x86_64-mlnx_msn2700a1-r0` | SN2700-A1 |
+| `x86_64-mlnx_msn4600-r0` | SN4600 |
+| `x86_64-mlnx_msn4700-r0` | SN4700 |
+| `x86_64-nvidia_sn4280-r0` | SN4280 |
+| `x86_64-nvidia_sn5640-r0` | SN5640 |
+| `x86_64-nvidia_sn6600_ld-r0` | SN6600_LD |
+
+No other platform gets the memory reservation. The one image-wide change is an explicit `KDUMP_NUM_DUMPS=3` default. The `config kdump` CLI and the KDUMP schema are unchanged.
+
+#### Overview
+
+A kernel crash is only captured if the `crashkernel=` reservation was on the kernel command line at boot. Enabling it today needs `config kdump enable` plus a reboot, which is often not schedulable on production switches, so unexplained reboots leave nothing to diagnose. This change puts the reservation on the installer's per-platform kernel command line, so every image installed on these platforms boots with kdump armed. hostcfgd and kdump-tools already arm kdump when the reservation is present, so no further configuration or reboot is needed.
+
+#### Requirements
+
+1. On each listed platform, an image installed through ONIE or `sonic-installer` boots with `crashkernel=0M-2G:256M,2G-4G:320M,4G-8G:384M,8G-16G:448M,16G-32G:768M,32G-:1G` on `/proc/cmdline`.
+2. On the first boot of that image, `show kdump config` reports kdump enabled with that memory string and `/sys/kernel/kexec_crash_loaded` is `1`, without any configuration command or extra reboot.
+3. A kernel panic on those platforms writes a dump under `/var/crash`, and the switch then reboots into SONiC.
+4. After `config kdump disable`, `config save` and a reboot, kdump stays disabled and the reservation is gone until the next image install.
+5. On every platform, `/etc/default/kdump-tools` in a freshly installed image has `KDUMP_NUM_DUMPS=3` before hostcfgd has run any kdump command.
+6. Every other platform, including those sharing `x86_64-mlnx_msn2700-r0/installer.conf` by symlink, installs with an unchanged kernel command line and an unchanged KDUMP default.
+
+Not supported: preserving a saved `enabled=false` across an upgrade (see Limitations), and targeting the reservation per HwSKU, since the installer writes the kernel command line before any HwSKU is chosen.
+
+#### Design
+
+```mermaid
+flowchart LR
+    subgraph build["Image build"]
+        D["device/mellanox/&lt;platform&gt;/installer.conf.override (NEW)"] -->|build_image.sh| P["installer/platforms/&lt;platform&gt;.override"]
+    end
+    subgraph install["Install (ONIE or sonic-installer)"]
+        P -->|installer/install.sh| C["ONIE_PLATFORM_EXTRA_CMDLINE_LINUX += crashkernel=…"]
+        C -->|installer/default_platform.conf| G["grub entry of the new image"]
+    end
+    subgraph boot["First boot"]
+        G --> K["/proc/cmdline"]
+        K --> T["kdump-tools.service loads the capture kernel (USE_KDUMP=1)"]
+        K --> H["hostcfgd: KDUMP|config enabled=true, memory=…"]
+    end
+```
+
+| Repository | Path | Change |
+| --- | --- | --- |
+| sonic-buildimage | `device/mellanox/<platform>/installer.conf.override`, one per listed platform | New file: `ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="$ONIE_PLATFORM_EXTRA_CMDLINE_LINUX crashkernel=<string from requirement 1>"` |
+| sonic-buildimage | `files/image_config/kdump/kdump-tools` | Append `KDUMP_NUM_DUMPS=3`. The packaged `#KDUMP_NUM_DUMPS=` means no purge, and the value is otherwise only written by `sonic-kdump-config --num_dumps`, which hostcfgd skips on the arming path. `config kdump num_dumps` keeps working, since its `sed` matches `#*KDUMP_NUM_DUMPS=`. |
+
+The override drop-in is used rather than `installer.conf` because `x86_64-mlnx_msn2700-r0/installer.conf` is symlinked from msn2100, msn2410, msn2740 and lssn2700. `ls device/mellanox/*/installer.conf.override` lists exactly the platforms that ship kdump armed.
+
+Existing behaviour this relies on, unchanged:
+
+- hostcfgd (`KdumpCfg.init_kdump_config_from_cmdline` in `sonic-host-services/scripts/hostcfgd`) syncs a `crashkernel=` found in `/proc/cmdline` into `KDUMP|config` and skips its first `kdump_update`, so grub is not rewritten on first boot.
+- The kdump-tools debconf question `kdump-tools/use_kdump` defaults to `true`, so a freshly installed image has `USE_KDUMP=1` and `kdump-tools.service` loads the capture kernel before `basic.target`.
+- warm-reboot and fast-reboot build the kexec command line from the next image's grub entry, so the reservation carries into the new kernel.
+
+#### Memory and boot impact
+
+The reservation removes memory from the running kernel according to the range string: 384M on 4–8G systems, 448M on 8–16G, 768M on 16–32G and 1G above 32G, evaluated against kernel-visible memory. On the listed platforms every boot type (cold, warm, fast) loads the capture kernel before `basic.target`, adding a few seconds to the boot critical chain. Other platforms are unaffected.
+
+#### Limitations
+
+- **Every install re-arms kdump.** Whenever hostcfgd starts with the reservation on the booted command line and `KDUMP|config` disagreeing with it, it rewrites the entry: `enabled` becomes `true` (overriding a saved `false`), `memory` becomes the command-line string, and `num_dumps`, `remote`, `ssh_string` and `ssh_path` return to their defaults. This happens on cold boots until `config save`, and on `config reload`. After an upgrade, an operator who wants kdump off runs `config kdump disable`, `config save`, then reboots.
+- The reservation is per platform, not per HwSKU.
+- Each dump uses `/var/crash` space, up to `num_dumps` files (default 3).
+
+#### Manual tests
+
+Run each case on every listed platform.
+
+| What is being tested | Test | Req |
+| --- | --- | --- |
+| Fresh install arms kdump | ONIE-install the image. On first boot, `/proc/cmdline` contains the requirement 1 `crashkernel=` string, `show kdump config` shows enabled with that memory, and `/sys/kernel/kexec_crash_loaded` is `1`. | 1, 2 |
+| Upgrade from an unarmed image | On an image without the reservation and with kdump disabled, run `sonic-installer install <new>` then `warm-reboot`. After the boot, the three checks above pass with no further command or reboot, and `grep ^KDUMP_NUM_DUMPS /etc/default/kdump-tools` prints `KDUMP_NUM_DUMPS=3`. | 1, 2, 5 |
+| Crash captured on the first boot | Straight after the upgrade case, with no further command or reboot, run `echo c > /proc/sysrq-trigger`. The switch returns to SONiC and `show kdump files` lists a new dump. | 3 |
+| Explicit disable | Run `config kdump disable`, `config save`, `sudo reboot`. `/proc/cmdline` has no `crashkernel=` and `show kdump config` shows disabled. | 4 |
+| Regression: warm reboot with a loaded capture kernel | On an armed switch, run sonic-mgmt `test_advanced_reboot.py::test_warm_reboot`. It passes within its existing dataplane and control-plane downtime limits, and `/sys/kernel/kexec_crash_loaded` is `1` afterwards. | — |
 
 ### Configuration commands:
 
