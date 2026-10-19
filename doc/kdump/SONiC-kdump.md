@@ -100,7 +100,7 @@ Since the kernel core dump files are relatively small (~90 MB), there is no expl
 
 ### Warmboot Requirements
 
-Enabling or Disabling kdump always requires a cold reboot of the switch, except on the platforms listed in [Default enablement on selected platforms](#default-enablement-on-selected-platforms), where kdump is armed at image install with no extra reboot. Warmboot is not supported while generating a core file in the event of a kernel crash.
+Enabling or Disabling kdump always requires a cold reboot of the switch, except on the selected platforms in [Default enablement on selected platforms](#default-enablement-on-selected-platforms), where kdump is armed at image install with no extra reboot. Warmboot is not supported while generating a core file in the event of a kernel crash.
 
 ### Configuration and Management Requirements
 
@@ -185,24 +185,14 @@ Changes to be done in *sonic-buildimage/build_debian.sh*
    - kdump-tools serive is enabled or disabled depending of administrative state (as stored in ConfigDB)
  - kdump is configured using the SONiC utility *config*.
  - kdump status and configuration can be shown using the SONiC utility *show*.
- - kdump is disabled by default, except on the platforms listed in [Default enablement on selected platforms](#default-enablement-on-selected-platforms).
- - if kdump is enabled and a new SONiC image is installed using the *sonic-installer* command, kdump will be enabled in the new installed image. On the platforms listed in [Default enablement on selected platforms](#default-enablement-on-selected-platforms), every install arms kdump regardless of the previous state.
+ - kdump is disabled by default, except on the selected platforms in [Default enablement on selected platforms](#default-enablement-on-selected-platforms).
+ - if kdump is enabled and a new SONiC image is installed using the *sonic-installer* command, kdump will be enabled in the new installed image. On the selected platforms in [Default enablement on selected platforms](#default-enablement-on-selected-platforms), every install arms kdump regardless of the previous state.
 
 ### Default enablement on selected platforms
 
 #### Scope
 
-kdump is enabled by default, on fresh install and on upgrade, on:
-
-| Platform | Switch |
-| --- | --- |
-| `x86_64-mlnx_msn2700-r0` | SN2700 |
-| `x86_64-mlnx_msn2700a1-r0` | SN2700-A1 |
-| `x86_64-mlnx_msn4600-r0` | SN4600 |
-| `x86_64-mlnx_msn4700-r0` | SN4700 |
-| `x86_64-nvidia_sn4280-r0` | SN4280 |
-| `x86_64-nvidia_sn5640-r0` | SN5640 |
-| `x86_64-nvidia_sn6600_ld-r0` | SN6600_LD |
+kdump is enabled by default, on fresh install and on upgrade, on a selected set of NVIDIA Spectrum platforms. A platform is in the set when it ships `device/mellanox/<platform>/installer.conf.override` carrying the reservation below; `ls device/mellanox/*/installer.conf.override` lists them.
 
 No other platform gets the memory reservation. The one image-wide change is an explicit `KDUMP_NUM_DUMPS=3` default. The `config kdump` CLI and the KDUMP schema are unchanged.
 
@@ -212,7 +202,7 @@ A kernel crash is only captured if the `crashkernel=` reservation was on the ker
 
 #### Requirements
 
-1. On each listed platform, an image installed through ONIE or `sonic-installer` boots with `crashkernel=0M-2G:256M,2G-4G:320M,4G-8G:384M,8G-16G:448M,16G-32G:768M,32G-:1G` on `/proc/cmdline`.
+1. On each selected platform, an image installed through ONIE or `sonic-installer` boots with `crashkernel=0M-2G:256M,2G-4G:320M,4G-8G:384M,8G-16G:448M,16G-32G:768M,32G-:1G` on `/proc/cmdline`.
 2. On the first boot of that image, `show kdump config` reports kdump enabled with that memory string and `/sys/kernel/kexec_crash_loaded` is `1`, without any configuration command or extra reboot.
 3. A kernel panic on those platforms writes a dump under `/var/crash`, and the switch then reboots into SONiC.
 4. After `config kdump disable`, `config save` and a reboot, kdump stays disabled and the reservation is gone until the next image install.
@@ -241,10 +231,10 @@ flowchart LR
 
 | Repository | Path | Change |
 | --- | --- | --- |
-| sonic-buildimage | `device/mellanox/<platform>/installer.conf.override`, one per listed platform | New file: `ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="$ONIE_PLATFORM_EXTRA_CMDLINE_LINUX crashkernel=<string from requirement 1>"` |
+| sonic-buildimage | `device/mellanox/<platform>/installer.conf.override`, one per selected platform | New file: `ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="$ONIE_PLATFORM_EXTRA_CMDLINE_LINUX crashkernel=<string from requirement 1>"` |
 | sonic-buildimage | `files/image_config/kdump/kdump-tools` | Append `KDUMP_NUM_DUMPS=3`. The packaged `#KDUMP_NUM_DUMPS=` means no purge, and the value is otherwise only written by `sonic-kdump-config --num_dumps`, which hostcfgd skips on the arming path. `config kdump num_dumps` keeps working, since its `sed` matches `#*KDUMP_NUM_DUMPS=`. |
 
-The override drop-in is used rather than `installer.conf` because `x86_64-mlnx_msn2700-r0/installer.conf` is symlinked from msn2100, msn2410, msn2740 and lssn2700. `ls device/mellanox/*/installer.conf.override` lists exactly the platforms that ship kdump armed.
+The override drop-in is used rather than `installer.conf` because `x86_64-mlnx_msn2700-r0/installer.conf` is symlinked from msn2100, msn2410, msn2740 and lssn2700.
 
 Existing behaviour this relies on, unchanged:
 
@@ -254,7 +244,7 @@ Existing behaviour this relies on, unchanged:
 
 #### Memory and boot impact
 
-The reservation removes memory from the running kernel according to the range string: 384M on 4–8G systems, 448M on 8–16G, 768M on 16–32G and 1G above 32G, evaluated against kernel-visible memory. On the listed platforms every boot type (cold, warm, fast) loads the capture kernel before `basic.target`, adding a few seconds to the boot critical chain. Other platforms are unaffected.
+The reservation removes memory from the running kernel according to the range string: 384M on 4–8G systems, 448M on 8–16G, 768M on 16–32G and 1G above 32G, evaluated against kernel-visible memory. On the selected platforms every boot type (cold, warm, fast) loads the capture kernel before `basic.target`, adding a few seconds to the boot critical chain. Other platforms are unaffected.
 
 #### Limitations
 
@@ -264,7 +254,7 @@ The reservation removes memory from the running kernel according to the range st
 
 #### Manual tests
 
-Run each case on every listed platform.
+Run each case on every selected platform.
 
 | What is being tested | Test | Req |
 | --- | --- | --- |
