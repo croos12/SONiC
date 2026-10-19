@@ -59,7 +59,7 @@ Rev   |   Date   |  Author   | Change Description
 0.2   | 10/29/19 | O. Singla | Changed the memory allocated for kdump
 0.3   | 11/04/19 | O. Singla | Minor changes
 0.4   | 12/17/19 | O. Singla | Removed the option to force reboot
-0.5   | 10/16/26 | C. Roos   | kdump enabled by default on selected NVIDIA Spectrum platforms
+0.5   | 10/16/26 | C. Roos   | kdump enabled by default on selected platforms
 
 ## About this Manual
 
@@ -192,7 +192,7 @@ Changes to be done in *sonic-buildimage/build_debian.sh*
 
 #### Scope
 
-kdump is enabled by default, on fresh install and on upgrade, on a selected set of NVIDIA Spectrum platforms. A platform is in the set when it ships `device/mellanox/<platform>/installer.conf.override` carrying the reservation below; `ls device/mellanox/*/installer.conf.override` lists them.
+kdump is enabled by default, on fresh install and on upgrade, on a selected set of platforms. A platform is in the set when it ships `device/<vendor>/<platform>/installer.conf.override` carrying the reservation below; `ls device/*/*/installer.conf.override` lists them.
 
 No other platform gets the memory reservation. The one image-wide change is an explicit `KDUMP_NUM_DUMPS=3` default. The `config kdump` CLI and the KDUMP schema are unchanged.
 
@@ -207,7 +207,7 @@ A kernel crash is only captured if the `crashkernel=` reservation was on the ker
 3. A kernel panic on those platforms writes a dump under `/var/crash`, and the switch then reboots into SONiC.
 4. After `config kdump disable`, `config save` and a reboot, kdump stays disabled and the reservation is gone until the next image install.
 5. On every platform, `/etc/default/kdump-tools` in a freshly installed image has `KDUMP_NUM_DUMPS=3` before hostcfgd has run any kdump command.
-6. Every other platform, including those sharing `x86_64-mlnx_msn2700-r0/installer.conf` by symlink, installs with an unchanged kernel command line and an unchanged KDUMP default.
+6. Every other platform, including one that shares a selected platform's `installer.conf` by symlink, installs with an unchanged kernel command line and an unchanged KDUMP default.
 
 Not supported: preserving a saved `enabled=false` across an upgrade (see Limitations), and targeting the reservation per HwSKU, since the installer writes the kernel command line before any HwSKU is chosen.
 
@@ -216,7 +216,7 @@ Not supported: preserving a saved `enabled=false` across an upgrade (see Limitat
 ```mermaid
 flowchart LR
     subgraph build["Image build"]
-        D["device/mellanox/&lt;platform&gt;/installer.conf.override (NEW)"] -->|build_image.sh| P["installer/platforms/&lt;platform&gt;.override"]
+        D["device/&lt;vendor&gt;/&lt;platform&gt;/installer.conf.override (NEW)"] -->|build_image.sh| P["installer/platforms/&lt;platform&gt;.override"]
     end
     subgraph install["Install (ONIE or sonic-installer)"]
         P -->|installer/install.sh| C["ONIE_PLATFORM_EXTRA_CMDLINE_LINUX += crashkernel=…"]
@@ -231,10 +231,10 @@ flowchart LR
 
 | Repository | Path | Change |
 | --- | --- | --- |
-| sonic-buildimage | `device/mellanox/<platform>/installer.conf.override`, one per selected platform | New file: `ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="$ONIE_PLATFORM_EXTRA_CMDLINE_LINUX crashkernel=<string from requirement 1>"` |
+| sonic-buildimage | `device/<vendor>/<platform>/installer.conf.override`, one per selected platform | New file: `ONIE_PLATFORM_EXTRA_CMDLINE_LINUX="$ONIE_PLATFORM_EXTRA_CMDLINE_LINUX crashkernel=<string from requirement 1>"` |
 | sonic-buildimage | `files/image_config/kdump/kdump-tools` | Append `KDUMP_NUM_DUMPS=3`. The packaged `#KDUMP_NUM_DUMPS=` means no purge, and the value is otherwise only written by `sonic-kdump-config --num_dumps`, which hostcfgd skips on the arming path. `config kdump num_dumps` keeps working, since its `sed` matches `#*KDUMP_NUM_DUMPS=`. |
 
-The override drop-in is used rather than `installer.conf` because `x86_64-mlnx_msn2700-r0/installer.conf` is symlinked from msn2100, msn2410, msn2740 and lssn2700.
+The override drop-in is used rather than `installer.conf` because a platform's `installer.conf` can be shared by symlink with platforms that do not opt in; each selected platform carries its own override file rather than a symlink to another's.
 
 Existing behaviour this relies on, unchanged:
 
